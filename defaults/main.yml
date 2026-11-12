@@ -1,0 +1,13 @@
+---
+
+portscan_target: ""                      # required: IP, hostname, CIDR (192.168.1.0/24), or comma-separated mix
+portscan_ports: "1-2024"                 # override with -e scan_ports=1-65535
+portscan_timing: "T4"                    # T3 is gentler on busy networks
+portscan_version: true                   # -sV: detect service and version (Linux)
+portscan_os: false                       # -O: OS detection (Linux, needs root)
+portscan_udp: false                      # -sU: top 100 UDP ports (Linux, needs root)
+portscan_timeout_s: 1                    # per-connection timeout (Windows)
+portscan_max_addresses: 4096             # safety cap on expanded addresses (Windows expansion)
+
+portscan_report_server: localhost
+portscan_report_path: /tmp/reports

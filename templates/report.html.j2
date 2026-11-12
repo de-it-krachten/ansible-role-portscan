@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Port scan report: {{ portscan_target | e }}</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1d1d1f; background: #fafafa; }
+  h1 { margin-bottom: .2rem; }
+  .meta { color: #666; margin-bottom: 1.5rem; }
+  .cards { display: flex; gap: 1rem; margin-bottom: 2rem; flex-wrap: wrap; }
+  .card { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 1rem 1.25rem; min-width: 10rem; }
+  .card b { display: block; font-size: 1.8rem; }
+  table { border-collapse: collapse; width: 100%; background: #fff; margin-bottom: 2rem; }
+  th, td { border-bottom: 1px solid #eee; padding: .5rem .75rem; text-align: left; font-size: .95rem; }
+  th { background: #f0f0f2; }
+  td.none { color: #888; font-style: italic; }
+  h2 { margin-top: 2rem; }
+  th.sort { cursor: pointer; user-select: none; }
+  th.sort.asc::after { content: ' \25B2'; }
+  th.sort.desc::after { content: ' \25BC'; }
+</style>
+</head>
+<body>
+<h1>Port scan report</h1>
+<div class="meta">Target: {{ portscan_target | e }} &middot; Ports: {{ portscan_ports | e }} &middot; Generated {{ now(utc=true).strftime('%Y-%m-%d %H:%M UTC') }}</div>
+
+{% set ns = namespace(tcp=0, udp=0, hosts=[]) %}
+{% set src_hosts = ansible_play_hosts | reject('equalto', portscan_report_server) | list %}
+{% for h in src_hosts %}
+  {% for p in hostvars[h].open_tcp_pairs | default([]) %}
+    {% set ns.tcp = ns.tcp + 1 %}
+    {% if p.split(' ')[0] not in ns.hosts %}{% set ns.hosts = ns.hosts + [p.split(' ')[0]] %}{% endif %}
+  {% endfor %}
+  {% for p in hostvars[h].open_udp_pairs | default([]) %}
+    {% set ns.udp = ns.udp + 1 %}
+    {% if p.split(' ')[0] not in ns.hosts %}{% set ns.hosts = ns.hosts + [p.split(' ')[0]] %}{% endif %}
+  {% endfor %}
+{% endfor %}
+
+<div class="cards">
+  <div class="card"><b>{{ src_hosts | length }}</b>source nodes</div>
+  <div class="card"><b>{{ ns.hosts | length }}</b>hosts with open ports</div>
+  <div class="card"><b>{{ ns.tcp }}</b>open TCP pairs</div>
+  <div class="card"><b>{{ ns.udp }}</b>open UDP pairs</div>
+</div>
+
+<h2>Source nodes</h2>
+<table id="source-nodes">
+<tr><th class="sort" data-type="text">Node</th><th class="sort" data-type="text">OS</th><th class="sort" data-type="ip">Source IP</th><th class="sort" data-type="num">Open TCP</th><th class="sort" data-type="num">Open UDP</th></tr>
+{% for h in src_hosts %}
+<tr>
+  <td>{{ h | e }}</td>
+  <td>{{ hostvars[h]['ansible_facts']['system'] | default('unknown') | e }}</td>
+  <td>{{ hostvars[h].source_ip | default('unknown') | e }}</td>
+  <td>{{ hostvars[h].open_tcp_pairs | default([]) | length }}</td>
+  <td>{{ hostvars[h].open_udp_pairs | default([]) | length }}</td>
+</tr>
+{% endfor %}
+</table>
+
+<h2>Open ports</h2>
+<table id="open-ports">
+<tr><th class="sort" data-type="text">Source node</th><th class="sort" data-type="text">Protocol</th><th class="sort" data-type="ip">Host</th><th class="sort" data-type="num">Port</th><th class="sort" data-type="text">State</th></tr>
+{% for h in src_hosts %}
+  {% for p in hostvars[h].open_tcp_pairs | default([]) %}
+<tr><td>{{ h | e }}</td><td>TCP</td><td>{{ p.split(' ')[0] | e }}</td><td>{{ p.split(' ')[1] | e }}</td><td>open</td></tr>
+  {% endfor %}
+  {% for p in hostvars[h].open_udp_pairs | default([]) %}
+<tr><td>{{ h | e }}</td><td>UDP</td><td>{{ p.split(' ')[0] | e }}</td><td>{{ p.split(' ')[1] | e }}</td><td>open</td></tr>
+  {% endfor %}
+{% endfor %}
+{% if ns.tcp + ns.udp == 0 %}
+<tr><td colspan="5" class="none">No open ports found</td></tr>
+{% endif %}
+</table>
+<script>
+(function () {
+  function keyOf(text, type) {
+    if (type === 'ip') {
+      var p = text.split('.');
+      if (p.length === 4 && p.every(function (n) { return /^\d+$/.test(n); })) {
+        return p.reduce(function (a, n) { return a * 256 + parseInt(n, 10); }, 0);
+      }
+      return text.toLowerCase();
+    }
+    if (type === 'num') { var n = parseInt(text, 10); return isNaN(n) ? text.toLowerCase() : n; }
+    return text.toLowerCase();
+  }
+  function compare(a, b) {
+    if (typeof a === typeof b) return a < b ? -1 : (a > b ? 1 : 0);
+    return typeof a === 'number' ? -1 : 1;
+  }
+  function makeSortable(table) {
+    var heads = table.querySelectorAll('th.sort');
+    heads.forEach(function (th) {
+      th.addEventListener('click', function () {
+        var type = th.getAttribute('data-type');
+        var dir = th.classList.contains('asc') ? 'desc' : 'asc';
+        heads.forEach(function (o) { o.classList.remove('asc', 'desc'); });
+        th.classList.add(dir);
+        var colIndex = Array.prototype.indexOf.call(th.parentNode.children, th);
+        var rows = Array.prototype.slice.call(table.rows, 1).filter(function (r) { return r.cells.length > 1 && !r.querySelector('td.none'); });
+        rows.sort(function (r1, r2) {
+          var c = compare(keyOf(r1.cells[colIndex].textContent.trim(), type), keyOf(r2.cells[colIndex].textContent.trim(), type));
+          return dir === 'asc' ? c : -c;
+        });
+        rows.forEach(function (r) { table.appendChild(r); });
+      });
+    });
+  }
+  ['source-nodes', 'open-ports'].forEach(function (id) {
+    var t = document.getElementById(id);
+    if (t) makeSortable(t);
+  });
+})();
+</script>
+</body>
+</html>

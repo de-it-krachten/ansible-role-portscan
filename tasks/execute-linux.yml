@@ -1,0 +1,100 @@
+---
+
+- name: Get the nmap version on this node
+  ansible.builtin.command: nmap --version
+  register: nmap_version
+  changed_when: false
+
+#    {{ '-sV' if portscan_version | bool else '' }}
+#    {{ '-O' if portscan_os | bool else '' }}
+- name: Run TCP scan (nmap accepts IPs, hostnames, CIDR, and comma-separated lists)
+  ansible.builtin.command: >-
+    nmap -Pn -n --open -{{ portscan_timing }} -p {{ portscan_ports }}
+    -oG - {{ portscan_target }}
+  register: tcp_scan
+  changed_when: false
+  become: "{{ portscan_os | bool }}"
+
+- name: Run UDP scan
+  ansible.builtin.command: >-
+    nmap -Pn -n --open -sU --top-ports 100 -{{ portscan_timing }}
+    -oG - {{ portscan_target }}
+  register: udp_scan
+  changed_when: false
+  become: true
+  when: portscan_udp | bool
+
+- name: Build ip/port lines for open TCP ports
+  ansible.builtin.set_fact:
+    open_tcp_json: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for line in tcp_scan.stdout_lines | select('search', 'Ports:') -%}
+      {%- set host = line.split()[1] -%}
+      {%- for p in line.split('Ports:')[1].split(',') -%}
+      {%- if '/open/tcp' in p -%}
+      {%- set ns.out = ns.out + [host ~ ' ' ~ p.strip().split('/')[0] ~ ' open'] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.out | to_json }}
+
+- name: Build ip/port lines for open UDP ports
+  ansible.builtin.set_fact:
+    open_udp_json: >-
+      {%- set ns = namespace(out=[]) -%}
+      {%- for line in (udp_scan.stdout_lines | default([])) | select('search', 'Ports:') -%}
+      {%- set host = line.split()[1] -%}
+      {%- for p in line.split('Ports:')[1].split(',') -%}
+      {%- if '/open/udp' in p -%}
+      {%- set ns.out = ns.out + [host ~ ' ' ~ p.strip().split('/')[0] ~ ' open'] -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.out | to_json }}
+
+- name: Decode ip/port lines
+  ansible.builtin.set_fact:
+    open_tcp_pairs: "{{ open_tcp_json | from_json }}"
+    open_udp_pairs: "{{ open_udp_json | from_json }}"
+
+- name: Record the source IP (default route address)
+  ansible.builtin.set_fact:
+    source_ip: "{{ (ansible_facts['default_ipv4'] | default({})).address | default('unknown') }}"
+
+- name: Show result on the console
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} (targets: {{ portscan_target }}):
+      {{ open_tcp_pairs | length }} open TCP ip/port pair(s);
+      {{ open_udp_pairs | length }} open UDP ip/port pair(s)
+
+- name: Write report on the report server
+  ansible.builtin.copy:
+    dest: "{{ portscan_report_path }}/{{ inventory_hostname }}_scan.txt"
+    content: |
+      Source node: {{ inventory_hostname }} ({{ ansible_host | default(inventory_hostname) }})
+      Source IP:   {{ source_ip }}
+      Targets:     {{ portscan_target }}
+      Groups:      {{ group_names | join(', ') }}
+      Generated:   {{ now(utc=true).strftime('%Y-%m-%d %H:%M:%S UTC') }}
+      Scanner:     {{ nmap_version.stdout_lines[0] }}
+      TCP ports:   {{ portscan_ports }} (timing {{ portscan_timing }}, version={{ portscan_version }}, os={{ portscan_os }})
+      UDP scan:    {{ 'top 100' if portscan_udp | bool else 'skipped' }}
+
+      Open ip/port pairs (TCP):
+      {% for l in open_tcp_pairs %}
+      {{ l }}
+      {% endfor %}
+      Open ip/port pairs (UDP):
+      {% for l in open_udp_pairs %}
+      {{ l }}
+      {% endfor %}
+
+      --- TCP (nmap greppable output) ---
+      {{ tcp_scan.stdout }}
+
+      --- UDP (nmap greppable output) ---
+      {{ udp_scan.stdout | default('skipped') }}
+    mode: "{{ portscan_report_mode | default('0644') }}"
+  become: "{{ portscan_report_become | default(true) }}"
+  delegate_to: "{{ portscan_report_server }}"

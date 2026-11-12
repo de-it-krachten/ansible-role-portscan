@@ -1,0 +1,7 @@
+---
+
+- name: Install nmap on the managed node
+  ansible.builtin.package:
+    name: nmap
+    state: present
+  become: true

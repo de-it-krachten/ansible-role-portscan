@@ -1,0 +1,47 @@
+---
+
+- name: Collect minimal facts to choose the right tasks
+  ansible.builtin.setup:
+    gather_subset:
+      - min
+      - network
+
+- name: Check that a target was given
+  ansible.builtin.assert:
+    that:
+      - portscan_target is defined
+      - portscan_target | length > 0
+    fail_msg: "Set the target with -e portscan_target=<host or IP>"
+  run_once: true
+  delegate_to: localhost
+
+- name: Show what we will scan
+  ansible.builtin.debug:
+    msg:
+      portscan_target: "{{ portscan_target | split(',') }}"
+      portscan_ports: "{{ portscan_ports | split(',') }}"
+  run_once: true
+
+- name: Create report location on the report server
+  ansible.builtin.file:
+    path: "{{ portscan_report_path }}"
+    state: directory
+    mode: "0755"
+  run_once: true
+  become: "{{ portscan_report_become | default(true) }}"
+  delegate_to: "{{ portscan_report_server }}"
+
+- name: Install and scan from Linux managed nodes
+  ansible.builtin.include_tasks: install-linux.yml
+  when: ansible_facts['os_family'] != 'Windows'
+
+- name: Scan from Linux managed nodes
+  ansible.builtin.include_tasks: execute-linux.yml
+  when: ansible_facts['os_family'] != 'Windows'
+
+- name: Scan from Windows managed nodes
+  ansible.builtin.include_tasks: execute-windows.yml
+  when: ansible_facts['os_family'] == 'Windows'
+
+- name: Render the combined HTML report from all nodes
+  ansible.builtin.include_tasks: report-html.yml

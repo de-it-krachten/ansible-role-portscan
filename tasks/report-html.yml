@@ -1,0 +1,10 @@
+---
+
+- name: Render the HTML report on the report server
+  ansible.builtin.template:
+    src: report.html.j2
+    dest: "{{ portscan_report_path }}/portscan_report_{{ ansible_date_time.iso8601 }}.html"
+    mode: "0644"
+  become: "{{ portscan_report_become | default(true) }}"
+  delegate_to: "{{ portscan_report_server }}"
+  run_once: true

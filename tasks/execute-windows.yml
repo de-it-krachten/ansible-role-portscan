@@ -1,0 +1,111 @@
+---
+
+- name: Expand targets on the controller (CIDR to addresses)
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ role_path }}/files/expand_targets.py"
+      - "{{ portscan_target }}"
+      - "{{ portscan_max_addresses }}"
+  delegate_to: localhost
+  register: expanded
+  changed_when: false
+
+- name: Store the expanded target list
+  ansible.builtin.set_fact:
+    win_targets: "{{ expanded.stdout | from_json }}"
+
+- name: Scan the targets with .NET sockets in parallel batches (Windows)
+  ansible.windows.win_shell: |
+    $timeout = [int]$env:SCAN_TIMEOUT_MS
+    $ports = @(foreach ($part in ($env:SCAN_PORTS -split ',')) {
+      if ($part -match '^(\d+)-(\d+)$') { [int]$matches[1]..[int]$matches[2] } else { [int]$part }
+    }) | Sort-Object -Unique
+
+    $targets = @($env:SCAN_TARGETS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    "INFO targets=$($targets.Count) ports=$($ports.Count)"
+
+    function Flush-Batch {
+      param($batch, [int]$wait)
+      Start-Sleep -Milliseconds $wait
+      foreach ($a in $batch) {
+        $open = $false
+        if ($a.Async.IsCompleted) {
+          try { $a.Client.EndConnect($a.Async); $open = $a.Client.Connected } catch { $open = $false }
+        }
+        if ($open) { "$($a.Target) $($a.Port) open" }
+        $a.Client.Close()
+      }
+      $batch.Clear()
+    }
+
+    $batch = New-Object System.Collections.ArrayList
+    foreach ($t in $targets) {
+      foreach ($p in $ports) {
+        $c = New-Object System.Net.Sockets.TcpClient
+        try {
+          $ar = $c.BeginConnect($t, $p, $null, $null)
+        } catch {
+          $c.Close()
+          continue
+        }
+        [void]$batch.Add([pscustomobject]@{ Target = $t; Port = $p; Client = $c; Async = $ar })
+        if ($batch.Count -ge 1000) { Flush-Batch -batch $batch -wait $timeout }
+      }
+    }
+    if ($batch.Count -gt 0) { Flush-Batch -batch $batch -wait $timeout }
+    "INFO done"
+  environment:
+    SCAN_TARGETS: "{{ win_targets | join(',') }}"
+    SCAN_PORTS: "{{ portscan_ports }}"
+    SCAN_TIMEOUT_MS: "{{ portscan_timeout_s | int * 1000 }}"
+  register: win_scan
+  changed_when: false
+
+- name: Keep open ip/port pairs (Windows)
+  ansible.builtin.set_fact:
+    open_tcp_pairs: "{{ win_scan.stdout_lines | select('match', '^\\S+ \\d+ open$') | sort | list }}"
+    open_udp_pairs: []
+
+- name: Read the source IP (default route address)
+  ansible.windows.win_shell: |
+    (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1).IPv4Address.IPAddress
+  register: win_source
+  changed_when: false
+
+- name: Record the source IP (Windows)
+  ansible.builtin.set_fact:
+    source_ip: "{{ (win_source.stdout | trim) or 'unknown' }}"
+
+- name: Show result on the console
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} (targets: {{ portscan_target }}, {{ win_targets | length }} address(es)):
+      {{ open_tcp_pairs | length }} open TCP ip/port pair(s); scanner rc={{ win_scan.rc | default('n/a') }}, stdout lines={{ win_scan.stdout_lines | default([]) | length }}, stderr={{ (win_scan.stderr | default('')) | trim | truncate(300) }}
+
+- name: Write report on the report server
+  ansible.builtin.copy:
+    dest: "{{ portscan_report_path }}/{{ inventory_hostname }}_scan.txt"
+    content: |
+      Source node: {{ inventory_hostname }} ({{ ansible_host | default(inventory_hostname) }})
+      Source IP:   {{ source_ip }}
+      Targets:     {{ portscan_target }} ({{ win_targets | length }} address(es))
+      Groups:      {{ group_names | join(', ') }}
+      Generated:   {{ now(utc=true).strftime('%Y-%m-%d %H:%M:%S UTC') }}
+      Scanner:     Windows .NET TcpClient (PowerShell)
+      TCP ports:   {{ portscan_ports }} (timeout {{ portscan_timeout_s }}s)
+      UDP scan:     not supported on Windows
+
+      Open ip/port pairs (TCP):
+      {% for l in open_tcp_pairs %}
+      {{ l }}
+      {% endfor %}
+
+      --- scanner rc: {{ win_scan.rc | default('n/a') }} ---
+      --- scanner stderr ---
+      {{ win_scan.stderr | default('') }}
+      --- scanner stdout (raw) ---
+      {{ win_scan.stdout | default('') }}
+    mode: "{{ portscan_report_mode | default('0644') }}"
+  become: "{{ portscan_report_become | default(true) }}"
+  delegate_to: "{{ portscan_report_server }}"
